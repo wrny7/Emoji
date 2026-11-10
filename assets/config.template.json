@@ -1,0 +1,28 @@
+{
+  "_readme": "复制到项目根目录 config.json 后按需修改。不写 config.json 时使用脚本内默认值，可直接跑。",
+  "pack_size": 24,
+  "size": 240,
+  "char_box": [225, 203],
+  "durations": [350, 250, 250, 450, 250, 350],
+  "color_steps": [255, 224, 192, 160, 128, 96, 64],
+  "limit_main": 98000,
+  "font_path": "C:/Windows/Fonts/msyh.ttc",
+
+  "_cutout_overrides_note": "局部返修专用：按条目号覆写抠图参数，绝不动全局默认值。改完必须对全部 GIF 做哈希 diff 证明无回归。",
+  "cutout_overrides": {},
+  "_overrides_examples": {
+    "浅色衣服被底部宽松阴影带啃出透明缺口": {"bg_min": 244, "bg_min_shadow": 244, "shadow_band": 0},
+    "深色模式下轮廓 halo 白边 / 杯把手封闭白洞": {"fill_holes": true, "erode_px": 1}
+  },
+
+  "_prop_text_overlay_note": "可选。道具上的精确文字用本地字体叠加，绝不让 AI 写字。box 是 512 格内的坐标 [x0,y0,x1,y1]；words 按 C1..C6 顺序，null 表示该帧不叠字（例如正在翻的斜页）。叠字前必须先看实际 sheet 确认哪几帧是平放页。",
+  "prop_text_overlay": {},
+  "_overlay_example": {
+    "18": {
+      "words": ["今天", null, "今天", "明天", "明天", "今天"],
+      "box": [180, 300, 360, 415],
+      "size": 44,
+      "color": "#30415B"
+    }
+  }
+}
