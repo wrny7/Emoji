@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""阶段 C：把「条目清单 + 形象基准卡」编译成 N 份可直接投喂 ImageGen 的 prompt。
+"""阶段 C：把「条目清单 + 形象基准卡」编译成 N 份视频 prompt。
 
-纯本地、零积分。不内置任何具体形象：身份锁全部从 character-card.json 注入。
+视频路线（v2.0.0）：每份 prompt 对应一段约 10 秒视频，角色参考图作视频
+的 image 输入，固定机位、纯白底、12 帧动作分解（C1 站立、C2–C4 蓄势、
+C5–C9 峰值区微变、C10–C11 回落、C12 回到 C1），循环闭合。
+编译本身纯本地、零积分；视频生成由 agent 的视频生成能力执行，不在本脚本里。
 
 用法：
   python make_prompts.py --workdir <project>
@@ -15,113 +18,75 @@ import argparse
 import json
 from pathlib import Path
 
-# ---- 最高优先级：网格独立成格 ----------------------------------------------
-# 宽场景 / 远景条目极易被模型画成「一整张连续画面」或留空格、跨格。
-# 历史事故：把 WIDE/DISTANT/SIDE-VIEW 写在 prompt 开头就会翻车，
-# 把 GRID LAYOUT 提到最高优先级并首尾重复后才稳定。
-GRID_LAYOUT = (
-    "GRID LAYOUT — HIGHEST PRIORITY. Produce EXACTLY SIX INDEPENDENT 512x512 CELLS "
-    "arranged 3 across and 2 down in ONE 1536x1024 canvas. Each cell contains EXACTLY "
-    "ONE complete, self-contained picture. NEVER treat the canvas as one continuous scene. "
-    "NEVER leave an empty cell. NEVER put two scenes in one cell. NEVER let any object, "
-    "character or prop cross a cell border. Cell order: 1 top-left, 2 top-center, "
-    "3 top-right, 4 bottom-left, 5 bottom-center, 6 bottom-right. "
-    "Keep a clean 24px white margin on all four sides of EVERY cell."
-)
-
-CLEAN_SHEET_GUARD = (
-    "CLEAN SHEET GUARD — PURE FLAT WHITE #FFFFFF background in every cell. "
-    "No gray, no gradient, no floor, no shadow, no horizon, no full-bleed background. "
-    "NO grid lines, NO separator lines, NO corner marks. "
-    "NO AI-generated text, letters, numbers, name strip, caption bar, watermark, "
-    "logo or signature anywhere on the sheet. "
-    "NOTE — 'no-caption version' means NO name-caption bar under the sticker, "
-    "NOT zero text inside the picture: precise prop text is rendered LOCALLY with a "
-    "font AFTER generation, so any prop surface meant to carry text must be drawn as "
-    "a perfectly CLEAN BLANK color block with no writing on it."
+# ---- 通用拍摄约束：固定机位 + 纯白底 + 循环闭合 ------------------------------
+CAMERA_GUARD = (
+    "CAMERA — FIXED camera: no zoom, no pan, no dolly. Full body centered at the "
+    "same size and position in every frame. Plain pure-white background, no text, "
+    "no watermark, no logo, no other character. The character stays fully inside "
+    "the frame with clear white margins on all sides in every frame."
 )
 
 PROP_PERSIST_GUARD = (
-    "PROP PERSIST GUARD — Every prop described below is present in ALL SIX frames and "
-    "keeps the SAME size, shape, color, count, orientation and position unless the "
-    "frame description explicitly says it moves. Props NEVER vanish, NEVER turn into "
-    "a different object and NEVER change color between frames. "
-    "Props must use warm or dark saturated colors: NO pure white and NO neutral light "
-    "gray parts — those get removed by the white-backdrop cutout flood-fill."
-)
-
-ACCENT_GUARD = (
-    "ACCENT GUARD — Sparkles, sweat drops, stars and glow effects appear ONLY in the "
-    "frames explicitly named below, nowhere else."
+    "PROP PERSIST GUARD — Every prop described below is present in ALL TWELVE frames "
+    "and keeps the SAME size, shape, color, count, orientation and position unless "
+    "the frame description explicitly says it moves. Props NEVER vanish, NEVER turn "
+    "into a different object and NEVER change color between frames. Props must use "
+    "warm or dark saturated colors: NO pure white and NO neutral light gray parts — "
+    "those get removed by the white-backdrop cutout flood-fill."
 )
 
 MOTION_DRAMATIC = (
-    "CRITICAL — SILHOUETTE MUST BE DRAMATICALLY DIFFERENT IN EVERY FRAME. This is a "
-    "physical animation, NOT six near-identical standing portraits with a changed face. "
-    "Hip height, head height, foot positions, torso angle and arm span MUST visibly "
-    "change between frames. Each pose below is a named, instantly recognizable body shape. "
-    "Use FRONTAL 2D silhouette changes only: side lean, shoulder-line slope, head tilt, "
-    "arm span, squat, kick, reach. NEVER use depth-direction poses (leaning forward / "
-    "leaning backward / turning the back to the viewer / stepping away) — in a frontal "
-    "2D drawing they barely change the silhouette and can hide the face."
+    "MOTION — DRAMATIC. This is a physical animation, NOT twelve near-identical "
+    "standing portraits with a changed face. Hip height, head height, foot positions, "
+    "torso angle and arm span MUST visibly change between frames. Each frame below is "
+    "a named, instantly recognizable body shape. Forward lean and stepping are allowed "
+    "as long as the face stays fully visible and the character stays fully inside the "
+    "frame. A run-in from far away must STOP at normal full-body size — the character "
+    "must NEVER fill the frame or become a close-up at any moment."
 )
 
 MOTION_STATE = (
-    "CRITICAL — THIS IS A SUBTLE STATE / EXPRESSION ANIMATION. All six frames share ONE "
-    "stable pose and ONE fixed camera. The animation comes ONLY from real changes in the "
-    "face (eyes, pupils, eyebrows, mouth, blush), a tiny breathing rise of the shoulders "
+    "MOTION — SUBTLE STATE / EXPRESSION ANIMATION. All twelve frames share ONE stable "
+    "pose and ONE fixed camera. The animation comes ONLY from real changes in the face "
+    "(eyes, pupils, eyebrows, mouth, blush), a tiny breathing rise of the shoulders "
     "and head, and small genuine movements of the hands and props. NEVER slide, scale, "
-    "rotate or bob the whole picture to fake motion. NEVER draw six identical frames: "
+    "rotate or bob the whole picture to fake motion. NEVER draw twelve identical frames: "
     "at least THREE facial or hand channels must differ between consecutive frames, "
-    "and FRAME 4 must be visibly the strongest."
+    "and the PEAK ZONE (frames 5-9) must be visibly the strongest."
 )
 
-FRAMING = {
-    'full': (
-        "FULL BODY framing. Character should FILL the cell: about 450-465px tall within "
-        "the 512px cell, including both feet in every frame. Keep the SAME character "
-        "scale in all six frames."
-    ),
-    'half': (
-        "UPPER-BODY framing from the waist up: head, BOTH hands and all props raised to "
-        "chest level and enlarged so fingers and small props stay readable. The cropped "
-        "upper body occupies about 430-450px of the 512px cell height, with the head "
-        "about 200px tall. The waist is cut by the framing ON PURPOSE. Head, both hands "
-        "and every prop must be fully inside the cell. Keep EXACTLY the same framing and "
-        "scale in all six frames. Even without legs, torso lean, shoulder height, head "
-        "tilt and arm span MUST change between frames."
-    ),
-    'scene': (
-        "WIDE SCENE framing. The character and its props form ONE coherent group occupying "
-        "about 400-450px of the 512px cell WIDTH, centered with generous empty white space "
-        "around it. The character is deliberately SMALLER than in a standard sticker but "
-        "still fully drawn: head, both hands, both feet and every prop inside the cell, "
-        "nothing cropped. Keep exactly the same camera angle and scale in all six frames. "
-        "NO full-bleed background, NO sea, NO sky, NO horizon, NO ground plane, NO shadow."
-    ),
-}
+MOTION_PRINCIPLES = (
+    "MOTION PRINCIPLES — Highlight the KEY action; normal body-coordination movement "
+    "is welcome, but NEVER add random extra actions that do not serve the meaning. "
+    "For gesture stickers, the gesture itself is the foreground: make it big, hold it "
+    "steady, keep the face secondary. Keep the same whitespace/margins across the whole "
+    "set (character max 225x203 inside the 240 canvas)."
+)
 
 NEGATIVE = (
     "STRICT NEGATIVE: NO sliding, scaling, rotating or tilting the whole picture as fake "
     "motion — all movement must come from real joints and real body parts. "
-    "No six identical standing poses. No one-arm-only animation while the rest of the "
+    "No twelve identical standing poses. No one-arm-only animation while the rest of the "
     "body stays frozen. No cropped head, hands, feet or props. No missing or duplicated "
     "limbs. No extra characters. No props other than the ones described. "
     "No pure-white or neutral-gray prop parts. No gray or colored background. "
     "NO AI-written text, letters, numbers, name strip, caption bar, watermark, logo or "
-    "signature anywhere. FRAME 6 MUST loop cleanly back to FRAME 1."
+    "signature anywhere. FRAME 12 MUST match FRAME 1 exactly so the loop closes with "
+    "no jump."
 )
 
-TEMPLATE = """{grid}
+TEMPLATE = """{identity}
 
-{clean}
+VIDEO PROMPT — {no} {text}
+A single continuous shot of about 10 seconds, smooth loopable motion.
 
-{framing}
+{camera}
 
 {motion}
+{principles}
 {frames}
 
-FACE / EXPRESSION: {face} Six DIFFERENT faces, never the same face repeated. Use the
+FACE / EXPRESSION: {face} Twelve DIFFERENT faces across the frames, never the same face repeated. Use the
 expression channels listed in the identity card; any part that is a FIXED ORNAMENT must
 stay STATIC and never act.
 
@@ -129,21 +94,17 @@ stay STATIC and never act.
 
 {prop_guard}
 
-{accent}
-
-{identity}
-
 {negative}
 
-FINAL REMINDER — SIX INDEPENDENT 512x512 CELLS, EACH ONE COMPLETE PICTURE, PURE WHITE
-BACKGROUND, NO BORDER CROSSING, NO EMPTY CELL, NO GRID LINES, NO TEXT, NO WATERMARK.
+FINAL REMINDER — FIXED CAMERA, FULL BODY, PURE WHITE BACKGROUND, NO TEXT, NO WATERMARK,
+FRAME 12 MATCHES FRAME 1 SO THE LOOP CLOSES.
 """
 
 
 def build(entry: dict, card: dict) -> str:
     frames = entry.get('frames') or []
-    if len(frames) != 6:
-        raise ValueError(f"条目 {entry.get('no')} 需要正好 6 帧描述，实际 {len(frames)}")
+    if len(frames) != 12:
+        raise ValueError(f"条目 {entry.get('no')} 需要正好 12 帧描述，实际 {len(frames)}")
     lines = '\n'.join(f'FRAME {i+1} — {t}' for i, t in enumerate(frames))
     prop = entry.get('prop_spec') or 'PROP DETAIL — NO PROPS AT ALL. The hands and body alone carry the meaning.'
     if entry.get('extra_guard'):
@@ -159,12 +120,12 @@ def build(entry: dict, card: dict) -> str:
     if not identity.upper().startswith('IDENTITY LOCK'):
         identity = 'IDENTITY LOCK:\n' + identity
     return TEMPLATE.format(
-        grid=GRID_LAYOUT, clean=CLEAN_SHEET_GUARD,
-        framing=FRAMING.get(entry.get('composition', 'full'), FRAMING['full']),
-        motion=motion, frames=lines,
-        face=entry.get('face', 'Expression changes progressively across the six frames.'),
-        prop=prop, prop_guard=PROP_PERSIST_GUARD, accent=ACCENT_GUARD,
-        identity=identity, negative=NEGATIVE,
+        identity=identity, no=f"{int(entry['no']):02d}",
+        text=entry.get('text', ''),
+        camera=CAMERA_GUARD, motion=motion, principles=MOTION_PRINCIPLES,
+        frames=lines,
+        face=entry.get('face', 'Expression changes progressively across the twelve frames.'),
+        prop=prop, prop_guard=PROP_PERSIST_GUARD, negative=NEGATIVE,
     )
 
 
@@ -200,7 +161,9 @@ def main():
         p.write_text(text, encoding='utf-8')
         written.append(str(p))
     print(json.dumps({'count': len(written), 'prompts_dir': str(out),
-                      'files': written[:5], 'note': '逐份投入 ImageGen，image1 固定为 character-reference.png'},
+                      'files': written[:5],
+                      'note': '每份 prompt 生成一段约 10 秒视频，角色参考图作视频 image 输入；'
+                              '再用 export_gifs.py 抽 12 帧导出'},
                      ensure_ascii=False, indent=2))
 
 

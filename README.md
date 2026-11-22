@@ -2,7 +2,7 @@
 
 一张角色图 → 24 张微信动态表情 GIF。
 
-这是一个 **WorkBuddy 专用 Skill**，同时也是一套可独立运行的本地脚本。它把一整套「角色定妆 → 24 条动作设计 → 六格图集生图 → 白底抠图 → 透明 GIF 编码 → 量化验收」的流程固化下来，包含流程文档、事故库和可直接复用的代码。
+这是一个 **WorkBuddy 专用 Skill**，同时也是一套可独立运行的本地脚本。它把一整套「角色定妆 → 24 条动作设计 → 视频 prompt 编译 → 视频生成 → 均匀抽帧 → 白底抠图 → 透明 GIF 编码 → 量化验收」的流程固化下来，包含流程文档、事故库和可直接复用的代码。
 
 ## 它做什么，不做什么
 
@@ -10,10 +10,12 @@
 |---|---|
 | 用**本次**用户提供的一张图，或现场用 ImageGen 生成的一张图作为唯一形象来源 | ❌ 不内置、不复用、不静默保存任何历史图片或定妆照 |
 | 产出 `01.gif` – `24.gif` 共 24 张动态 GIF | ❌ 不做封面、缩略图、聊天页图标、详情页横幅、CSV、上传清单、ZIP 投稿包 |
-| 附带逐帧预览、整体预览 HTML、`qa.json` | ❌ 不让 AI 写画面内文字（精确文字走本地字体叠加） |
+| 附带逐帧预览、整体预览 HTML、`qa.json` | ❌ 不让 AI 写画面内文字（精确文字走本地字体叠加；视频路线不设叠字步骤，动作设计时就避免精确文字） |
 | 完整流程文档、Prompt Guard、QA 判据、事故库 | ❌ 不绑定任何具体角色 / IP / 项目路径 |
 
-**单张 GIF 硬规格**：`240×240`、透明背景、6 帧且帧帧互异、`loop=0` 无限循环、≤100KB、文件名 `01.gif`–`24.gif`。
+**单张 GIF 硬规格**：`240×240`、透明背景、12 帧且帧帧互异、帧时长 `[150,150,150,150,150,300,150,150,150,150,150,150]ms`（第 6 帧停 300ms，总 1.95 秒）、`loop=0` 无限循环、≤340KB（微信官方主图上限 500KB，生产安全线 340KB）、文件名 `01.gif`–`24.gif`。
+
+**动作拆解格式**：每条 12 帧，C1 站立起势、C2–C4 展开蓄势、C5–C9 峰值区（核心姿态保持不换，靠表情 / 重心 / 头歪 / 眨眼 / 道具微动填充）、C10–C11 回落、C12 回到 C1，保证循环不跳。
 
 ## 安装
 
@@ -35,26 +37,27 @@ Windows 下也可直接复制本仓库内容到该目录。重启会话后，说
 python -m pip install -r requirements.txt
 ```
 
-依赖只有 Pillow。所有脚本都接受 `--workdir <项目目录>`，不写死任何项目路径。
+依赖只有 Pillow；抽帧另需系统 ffmpeg / ffprobe。所有脚本都接受 `--workdir <项目目录>`，不写死任何项目路径。
 
 ### 额外环境
 
 - Python 3.9+
-- 本地中文字体（仅「道具精确文字叠加」需要）：`C:/Windows/Fonts/msyh.ttc`，可在 `config.json` 里改 `font_path`
-- 图像生成能力：WorkBuddy 的 `ImageGen`。调用前先用 `ToolSearch` 加载 schema，再 `DeferExecuteTool` 调用，**不要凭记忆猜参数**。历史验证过的参数值见 `references/prompt-guide.md`
+- ffmpeg / ffprobe（抽帧用）：`ffmpeg -version` 能跑即可
+- 视频生成能力：WorkBuddy 的视频生成（media generation）。每份 prompt 生成一段约 10 秒视频，角色参考图作视频 image 输入
+- 本地中文字体（仅旧版 sprite-sheet 路线叠字需要，本路线不用）：`C:/Windows/Fonts/msyh.ttc`，可在 `config.json` 里改 `font_path`
 
 ## 五步流程
 
 ```
 A 形象基准（1 张图 → 透明基准卡 + 手写身份锁）
         ↓ 用户确认形象
-B 条目与动作设计（默认 24 条，方案先行）
+B 条目与动作设计（默认 24 条，12 帧分解，方案先行）
         ↓ 用户确认
-C 编译 24 份 prompt → 只生成 1 套样张 → 九项清单打勾
-        ↓ 样张通过 + 一次性授权积分
-D 批量生成 23 套 → 逐张程序化复核 → 针对性重做
+C 编译 24 份视频 prompt → 只生成 1 条样张视频 → 抽帧验收清单打勾
+        ↓ 样张通过 + 一次性授权
+D 批量生成 23 条视频 → 逐条抽帧复核 → 针对性重做
         ↓
-E 本地导出 24 张 GIF → QA 全绿 → 深灰底人工复核 → 交付
+E 本地抽帧导出 24 张 GIF → QA 全绿 → 深灰底人工复核 → 交付
 ```
 
 门禁不可跳。用户说「一次性自动做完」时可以把 B/C/D 的确认合并成开头一次总授权，但**方案文档和样张仍要生成留档**。
@@ -71,19 +74,19 @@ python <repo>/scripts/prepare_character.py --workdir . --input character.png --n
 # → character/character-reference.png + character-card.json
 # ⚠️ 必须用 ViewImage 打开基准图，逐项手写 identity_lock（四层结构）
 
-# C · 编译 24 份 prompt
+# C · 编译 24 份视频 prompt
 python <repo>/scripts/make_prompts.py --workdir .
 # → prompts/01.txt … 24.txt
-# 先只把 prompts/10.txt 投给 ImageGen，输出到 sheets/10/
+# 先只把 prompts/10.txt 拿去生成 1 条约 10 秒视频，存到 videos/10.mp4
 
-# D · 逐张验收图集
-python <repo>/scripts/check_sheet.py --workdir . --only 10
-python <repo>/scripts/check_sheet.py --workdir .
+# D · 逐条验收视频（抽帧看动作、留白、循环闭合）
+# 先抽 1 条看效果，再批量生成其余 23 条视频到 videos/NN.mp4
 
 # E · 导出与 QA
-python <repo>/scripts/export_gifs.py --workdir . --only 10   # 单张试跑
-python <repo>/scripts/export_gifs.py --workdir .              # 全量 24 张
+python <repo>/scripts/export_gifs.py --workdir . --only 10   # 单条试跑
+python <repo>/scripts/export_gifs.py --workdir .              # 全量 24 条
 # → output/gifs/01.gif … 24.gif, output/preview/, output/qa.json
+# 抽出的 12 帧留在 frames/NN/ 供复核
 ```
 
 局部返修：复制 `assets/config.template.json` 为项目根 `config.json`，用 `cutout_overrides` **按编号**覆写，绝不动全局默认阈值；返修后对全部 GIF 做 sha256 diff 证明只有目标条目变化。
@@ -92,10 +95,10 @@ python <repo>/scripts/export_gifs.py --workdir .              # 全量 24 张
 
 | 文档 | 内容 |
 |---|---|
-| `workflow.md` | 五步流程细则、九项样张验收清单、生图调用模板 |
+| `workflow.md` | 五步流程细则、样张验收清单、视频生成调用模板 |
 | `platform-spec.md` | 单张 GIF 硬规格；投稿包扩展仅作可选知识 |
-| `prompt-guide.md` | 身份锁四层结构、全部 Guard 全文与理由、姿态词库、ImageGen 参数 |
-| `export-pipeline.md` | 抠图阈值、编码参数、局部覆写、QA 判据与返修纪律 |
+| `prompt-guide.md` | 身份锁四层结构、视频 prompt 模板、12 帧动作格式、姿态词库 |
+| `export-pipeline.md` | 抽帧、抠图阈值、编码参数、局部覆写、QA 判据与返修纪律 |
 | `pitfalls.md` | 血泪事故库 + R1–R14 硬规则全文 |
 
 ## 目录结构
@@ -108,15 +111,14 @@ wechat-sticker-pack/
 ├── requirements.txt               # Pillow
 ├── .gitignore
 ├── assets/
-│   ├── entries-24.json            # 默认 24 条完整动作设计稿（可整体替换）
-│   └── config.template.json       # 体积 / 抠图覆写 / 本地叠字配置模板
+│   ├── entries-24.json            # 默认 24 条完整动作设计稿（12 帧分解，可整体替换）
+│   └── config.template.json       # 体积 / 抠图覆写配置模板
 ├── references/                    # 5 份流程与规则文档
 ├── scripts/
 │   ├── sticker_lib.py             # 抠图 / 排版 / GIF 编码 / 量化 QA 核心库
 │   ├── prepare_character.py       # 阶段 A
-│   ├── make_prompts.py            # 阶段 C
-│   ├── check_sheet.py             # 阶段 D 验收
-│   └── export_gifs.py             # 阶段 E 导出
+│   ├── make_prompts.py            # 阶段 C：编译 24 份视频 prompt
+│   └── export_gifs.py             # 阶段 E：视频抽帧导出 24 张 GIF
 └── tests/
     └── smoke_test.py              # 端到端冒烟测试（纯本地，不联网、零积分）
 ```
@@ -127,13 +129,18 @@ wechat-sticker-pack/
 python tests/smoke_test.py
 ```
 
-冒烟测试会造一张假角色图和 3 张假 `1536×1024` 六格图集，跑通 A → C → D → E 全链路，验证 24 份 prompt 生成、3 张 GIF 的尺寸 / 帧数 / 体积 / 透明度 / 循环 / 帧互异 / 无空白帧 / 无边缘裁切。测试数据在临时目录里，跑完自动清理。
+冒烟测试会造一张假角色图和 12 张假视频帧，跑通 A → C → E 的本地部分，验证 24 份视频 prompt 生成、3 张 GIF 的尺寸 / 帧数 / 体积 / 透明度 / 循环 / 帧互异 / 无空白帧 / 无边缘裁切。视频生成与 ffmpeg 抽帧不在测试覆盖内。测试数据在临时目录里，跑完自动清理。
 
 ## 成本与隐私
 
-- 全流程约 24 次生图（1 次形象 + 1 次样张 + 23 套图集，重做另算），历史实测约 120–240 积分。**花积分前只确认一次。**
-- 本仓库不含任何图片资产。用户提供的角色图、`sheets/`、`character/`、`output/` 全部在 `.gitignore` 里，避免把形象资产误推到公开仓库。
-- 改文案只改数据、零成本；改动作要重生成对应图集；改形象等于 24 套全部重做。
+- 全流程约 24 次视频生成（1 次形象 + 1 条样张 + 23 条批量，重做另算）。**花积分前只确认一次。**
+- 本仓库不含任何图片资产。用户提供的角色图、`videos/`、`frames/`、`character/`、`output/` 全部在 `.gitignore` 里，避免把形象资产误推到公开仓库。
+- 改文案只改数据、零成本；改动作要重生成对应视频；改形象等于 24 条视频全部重做。
+
+## 版本说明
+
+- v2.0.0（2026-11-22）：视频路线。12 帧拆解、≤340KB，替代 v1 的 3×2 六格 sprite-sheet 路线（6 帧、≤100KB）。旧路线文件 `check_sheet.py` 已删除；`sticker_lib.py` 的图集切分函数已移除；`entries-24.json` 由 6 帧机械转换为 12 帧。
+- v1（2026-11-10）：初版，sprite-sheet 路线。历史教训见 `references/pitfalls.md`。
 
 ## 许可证
 
