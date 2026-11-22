@@ -83,7 +83,7 @@ def main() -> None:
         card['identity_lock'] = (
             'IDENTITY LOCK: (1) A single warm-cream round character with no headwear. '
             '(2) Two large blue eyes always fully visible, no glasses over the eyes. '
-            '(3) A small rosy oval is the real mouth; no beak, no animating the mouth shape. '
+            '(3) A small rosy oval is the real mouth; do not animate the mouth shape. '
             '(4) Blue scarf at the neck, warm-cream egg-shaped body, both hands and feet visible.'
         )
         card['identity_checks'] = ['eyes fully visible', 'no headwear over eyes']

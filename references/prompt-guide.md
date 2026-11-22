@@ -29,12 +29,11 @@ all twelve frames except pose/expression. Four layers, top to bottom:
 
 写法要点：
 - 用英文短句，每条写「是什么 + 在哪 + 绝不怎样」。模型对否定句敏感，`NEVER over the eyes, never on the nose` 这类双重要比「头顶装饰」有效得多。
-- **把容易被误读的结构写成显式否定**。历史项目里模型极易把头顶墨镜画到眼睛上、把兜帽上的黄色装饰件当嘴来开合，所以最终版是四句独立英文锁：
-  - `sunglasses rest on top never cover eyes`
-  - `yellow duck bill is fixed ornament not a mouth`
-  - `real mouth is small rosy oval`
-  - `both grey-blue eyes always fully visible`
-  （以上是历史案例的形态，**不是本技能的默认形象**，只演示写法。）
+- **把容易被误读的结构写成显式否定**。历史项目里模型极易把头顶的装饰件画到眼睛上、把胸前的静态装饰当嘴来开合，所以最终版是四句独立英文锁（以下用一个虚构示例形象演示写法，**本库不带任何形象，形象由使用者自己提供**）：
+  - `round ears stay on top of the hood, never cover the eyes`
+  - `the star badge on the chest is a fixed decoration, never moves or changes shape`
+  - `the real mouth is a small pink oval below the nose`
+  - `both round eyes are always fully visible`
 - 身份锁和验收清单必须成对出现。写进 prompt 的每一条，`identity_checks` 里都要有对应检查项。
 - 抬头可写可不写：`make_prompts.py` 检测到 `IDENTITY LOCK` 开头就原样使用，否则自动补 `IDENTITY LOCK:`。两种写法都不会出现重复标题，不要自己再加一层。
 - **颜色以抽帧实测为准**：prompt 里的颜色描述是约束，不是保证。抽出的 12 帧要逐张核对颜色与基准卡是否一致，不一致就重生成视频，不要在抠图端硬调。
@@ -79,12 +78,12 @@ at any moment.
 
 十二帧共用一个稳定姿势和固定机位，动画只来自脸（眼 / 瞳 / 眉 / 嘴 / 脸颊）、肩头轻微呼吸起伏、手与道具的真实小动作。**禁止整体平移 / 缩放 / 旋转 / 上下浮动伪造动作**；相邻帧至少 3 个表情或手部通道不同，峰值区（C5–C9）最强。
 
-状态型的量化验收线要单独定，不能套动作型的质心位移判据 —— 比心、点赞、捂脸、台历这类靠「手势恒定 + 脸变化」表达，质心几乎不动是设计使然。
+状态型的量化验收线要单独定，不能套动作型的质心位移判据 —— 手势恒定类靠「手势恒定 + 脸变化」表达，质心几乎不动是设计使然。
 
 ### MOTION_PRINCIPLES（动作原则，2026-11-22 定版）
 
 - **突出重点动作**：每条只讲一个核心动作，写清、写大、拿稳。
-- 正常的身体协调动作可以有（点头、迈步、重心移动、蝴蝶结 / 配饰跟随摆动）。
+- 正常的身体协调动作可以有（点头、迈步、重心移动、配饰跟随摆动）。
 - **不要加与含义无关的多余动作**：凑数的转圈、跳跃、挥手、道具只会稀释辨识度。
 - 手势类条目：手势本身是前景，放大、拿稳、脸是配角。
 - 留白比例全套一致：角色在 240 画布内最大占位 225×203；跑近类动作远处起步小、跑近才到正常尺寸，最大时全身完整在画面内、四周都有白边。
