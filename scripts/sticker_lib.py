@@ -2,10 +2,12 @@
 # -*- coding: utf-8 -*-
 """表情包导出核心库：白底抠图 / 240 排版 / 透明 GIF 编码 / 量化 QA。
 
-纯本地、零积分。所有阈值都可通过函数参数或项目 config.json 覆写。
+视频路线（v2.0.0）：每条表情先生成一段约 10 秒视频，均匀抽 12 帧，
+再走 cutout → frame_240 → encode_gif。纯本地、零积分。
+所有阈值都可通过函数参数或项目 config.json 覆写。
 不引用任何具体角色、具体图片或固定路径。
 
-依赖：Python 3.9+、Pillow
+依赖：Python 3.9+、Pillow；抽帧另需系统 ffmpeg / ffprobe。
 """
 from __future__ import annotations
 
@@ -15,14 +17,15 @@ from pathlib import Path
 from PIL import Image, ImageChops, ImageFilter
 
 # ---- 默认参数（历史实测值，可用 config.json 覆盖） --------------------------
-CELL = 512                 # sprite sheet 每格边长
-COLS, ROWS = 3, 2          # 3x2 六格 = 六个动画帧
 SIZE = 240                 # 微信主图边长
 THUMB = 120                # 缩略图边长
 CHAR_BOX = (225, 203)      # 角色在 240 画布内的最大占位（保持角色偏小，不压字）
 COLOR_STEPS = [255, 224, 192, 160, 128, 96, 64]
-DURATIONS = [350, 250, 250, 450, 250, 350]   # ms，C4 峰值停顿更长
-LIMIT_MAIN = 98_000        # 主图 GIF，留 2KB 余量给 100KB 硬线
+# 12 帧，第 6 帧停 300ms，其余 150ms，总 1.95 秒（已交付成品实测）。
+DURATIONS = [150, 150, 150, 150, 150, 300, 150, 150, 150, 150, 150, 150]
+# 主图 GIF 上限 340KB：微信官方主图上限 500KB，生产安全线 340KB。
+# 旧版 100KB 目标是错的——12 帧 255 色实测 124–197KB，不可能压进 100KB。
+LIMIT_MAIN = 340_000        # 给 500KB 官方上限留余量
 LIMIT_THUMB = 48_000
 LIMIT_COVER = 78_000
 LIMIT_ICON = 28_000
@@ -169,60 +172,6 @@ def cutout(cell, fill_holes=False, erode_px=0, edge_clear=EDGE_CLEAR, **kw):
     return rgba
 
 
-def sheet_tiles(sheet_path, overrides=None, cell=CELL, cols=COLS, rows=ROWS,
-                clean_grid=True):
-    """读一张 3x2 sprite sheet，切成 6 张透明 RGBA 帧。
-
-    overrides: {条目号: {抠图参数}}，用于局部返修，不改全局默认值。
-    """
-    im = Image.open(sheet_path).convert('RGB')
-    expect = (cols * cell, rows * cell)
-    if im.size != expect:
-        raise ValueError(f'{Path(sheet_path).name}: 期望 {expect}，实际 {im.size}')
-    if clean_grid:
-        im = remove_grid_lines(im)
-    kw = overrides or {}
-    return [cutout(im.crop((c * cell, r * cell, (c + 1) * cell, (r + 1) * cell)), **kw)
-            for r in range(rows) for c in range(cols)]
-
-
-def remove_grid_lines(im, cell=CELL):
-    """清掉模型偶尔画在格线位置的淡灰分隔线（纯本地，不用重生成）。"""
-    px = im.load()
-    w, h = im.size
-    cleaned = 0
-    for x in list(range(cell - 2, cell + 3)) + list(range(2 * cell - 2, 2 * cell + 3)):
-        if not (0 <= x < w):
-            continue
-        for y in range(h):
-            r, g, b = px[x, y][:3]
-            if 165 <= min(r, g, b) and max(r, g, b) <= 248 and max(r, g, b) - min(r, g, b) <= 12:
-                px[x, y] = (255, 255, 255)
-                cleaned += 1
-    for y in range(cell - 2, cell + 3):
-        if not (0 <= y < h):
-            continue
-        for x in range(w):
-            r, g, b = px[x, y][:3]
-            if 165 <= min(r, g, b) and max(r, g, b) <= 248 and max(r, g, b) - min(r, g, b) <= 12:
-                px[x, y] = (255, 255, 255)
-                cleaned += 1
-    return im
-
-
-def soften_bottom(tile, fade=28):
-    """半身构图底边做柔化，避免硬切腰线（设计上故意裁腰，不是裁切事故）。"""
-    t = tile.copy()
-    a = t.getchannel('A').load()
-    w, h = t.size
-    for y in range(h - fade, h):
-        k = (h - y) / fade
-        for x in range(w):
-            a[x, y] = int(a[x, y] * k)
-    return t
-
-
-# ---- 排版与编码 -------------------------------------------------------------
 def frame_240(tile, size=SIZE, char_box=CHAR_BOX, top_align=False, text_y=207):
     """把 512 格缩到 240 透明画布。
 
@@ -389,12 +338,13 @@ def edge_crop_ok(tile, band=2):
     return True
 
 
-def strip_dark(tiles, path, cell=160, dark=DARK):
-    """六帧铺在深色背景上，供肉眼检查白边/透明/缺块。"""
+def strip_dark(tiles, path, cell=160, dark=DARK, cols=4):
+    """十二帧铺在深色背景上，供肉眼检查白边/透明/缺块（4 列 × 3 行）。"""
     from PIL import Image
-    out = Image.new('RGB', (COLS * cell, ROWS * cell), dark)
+    rows = (len(tiles) + cols - 1) // cols
+    out = Image.new('RGB', (cols * cell, rows * cell), dark)
     for i, t in enumerate(tiles):
-        r, c = divmod(i, COLS)
+        r, c = divmod(i, cols)
         small = t.resize((cell, cell), Image.Resampling.LANCZOS)
         layer = Image.new('RGBA', (cell, cell), dark + (255,))
         layer.alpha_composite(small)

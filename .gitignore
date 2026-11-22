@@ -11,7 +11,8 @@ venv/
 work/
 my-pack/
 character/
-sheets/
+videos/
+frames/
 prompts/
 output/
 config.json

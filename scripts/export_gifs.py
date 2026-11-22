@@ -1,25 +1,34 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""阶段 D：把 N 张 3x2 sprite sheet 导出为 N 张 240x240 透明动态 GIF。
+"""阶段 E：把 N 段约 10 秒视频导出为 N 张 240x240 透明动态 GIF。
 
+视频路线（v2.0.0）：每段视频均匀抽 12 帧 → cutout 抠图透明
+（默认 erode_px=1）→ frame_240 → 按 12 帧时长编码。
 本技能只交付 GIF 本体，不产出缩略图 / 封面 / 图标 / 横幅 / CSV / ZIP 投稿包。
 附带产物仅为验收用：逐帧深灰底预览、整体预览 HTML、qa.json。
 
 纯本地、零积分。不引用任何具体角色或固定图片。
+抽帧需要系统 ffmpeg / ffprobe（`ffmpeg -version` 能跑即可）。
 
 用法：
   python export_gifs.py --workdir <project>
   python export_gifs.py --workdir <project> --only 01 05 18
   python export_gifs.py --workdir <project> --config path/to/config.json
+
+视频位置：<workdir>/videos/NN.mp4，或 <workdir>/videos/NN/ 目录下最新一个
+.mp4（重做版自动生效）。抽出的 12 帧留在 <workdir>/frames/NN/ 供复核。
 """
 from __future__ import annotations
 
 import argparse
 import html
 import json
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 
 import sticker_lib as lib
 
@@ -27,13 +36,14 @@ DEFAULT_CONFIG = {
     'pack_size': 24,
     'size': 240,
     'char_box': [225, 203],
-    'durations': [350, 250, 250, 450, 250, 350],
+    'durations': [150, 150, 150, 150, 150, 300, 150, 150, 150, 150, 150, 150],
     'color_steps': [255, 224, 192, 160, 128, 96, 64],
-    'limit_main': 98_000,
+    'limit_main': 340_000,
     'cutout_overrides': {},
-    'prop_text_overlay': {},
-    'font_path': 'C:/Windows/Fonts/msyh.ttc',
+    'erode_px': 1,
 }
+
+N_FRAMES = 12
 
 
 def load_config(work: Path, override: str = '') -> dict:
@@ -44,50 +54,42 @@ def load_config(work: Path, override: str = '') -> dict:
     return cfg
 
 
-def find_sheet(sheets: Path, no: int) -> Path | None:
-    """支持 sheets/NN/*.png（取最新一张，重做版自动生效）或 sheets/NN.png。"""
-    folder = sheets / f'{no:02d}'
+def find_video(videos: Path, no: int) -> Path | None:
+    """支持 videos/NN.mp4，或 videos/NN/ 目录下最新一个 .mp4。"""
+    folder = videos / f'{no:02d}'
     if folder.is_dir():
-        hits = sorted(folder.glob('*.png'), key=lambda p: p.stat().st_mtime)
+        hits = sorted(folder.glob('*.mp4'), key=lambda p: p.stat().st_mtime)
         if hits:
             return hits[-1]
-    flat = sheets / f'{no:02d}.png'
+    flat = videos / f'{no:02d}.mp4'
     return flat if flat.exists() else None
 
 
-def overlay_text(tiles, spec, font_path):
-    """按帧在本地叠精确文字（不经过 AI）。在 512 格阶段叠，缩放后仍清晰。
+def video_duration(video: Path) -> float:
+    r = subprocess.run(['ffprobe', '-v', 'error', '-show_entries',
+                        'format=duration', '-of', 'json', str(video)],
+                       capture_output=True, text=True)
+    if r.returncode:
+        raise RuntimeError(f'ffprobe 读不到时长：{video}：{r.stderr.strip()[:200]}')
+    return float(json.loads(r.stdout)['format']['duration'])
 
-    spec: {"words": ["今天", null, "今天", "明天", "明天", "今天"],
-           "box": [180, 300, 360, 415],  # 512 格内的相对坐标
-           "size": 44, "color": "#30415B"}
-    """
-    words = spec.get('words') or []
-    box = spec.get('box')
-    if not box or len(box) != 4:
-        raise ValueError('prop_text_overlay 需要 box: [x0,y0,x1,y1]（512 格内坐标）')
-    size = spec.get('size', 44)
-    color = spec.get('color', '#30415B')
-    try:
-        font = ImageFont.truetype(font_path, size)
-    except OSError:
-        font = ImageFont.load_default()
-    drawn = []
-    out = []
-    for i, t in enumerate(tiles):
-        word = words[i] if i < len(words) else None
-        t = t.copy()
-        if word:
-            d = ImageDraw.Draw(t)
-            bb = d.textbbox((0, 0), word, font=font)
-            tw, th = bb[2] - bb[0], bb[3] - bb[1]
-            x = box[0] + (box[2] - box[0] - tw) // 2 - bb[0]
-            y = box[1] + (box[3] - box[1] - th) // 2 - bb[1]
-            d.text((x, y), word, font=font, fill=color)
-            drawn.append(i + 1)
-        out.append(t)
-    return out, {'words': words, 'box': box, 'drawn_frames': drawn,
-                 'font': str(font_path), 'mode': 'local-pillow'}
+
+def extract_frames(video: Path, outdir: Path, n: int = N_FRAMES) -> list[Path]:
+    """在视频全长内均匀抽 n 帧。采样点为 i*(dur-0.5)/(n-1)，留 0.5 秒尾巴余量，
+    避免抽到片尾黑帧；第 1 帧取视频开头，第 n 帧接近片尾。"""
+    dur = video_duration(video)
+    times = [round(i * (dur - 0.5) / (n - 1), 2) for i in range(n)]
+    outdir.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for i, t in enumerate(times):
+        p = outdir / f'C{i+1:02d}.png'
+        r = subprocess.run(['ffmpeg', '-v', 'error', '-y', '-ss', str(t),
+                            '-i', str(video), '-frames:v', '1', str(p)],
+                           capture_output=True, text=True)
+        if r.returncode or not p.exists():
+            raise RuntimeError(f'ffmpeg 抽帧失败 C{i+1} @ {t}s：{r.stderr.strip()[:200]}')
+        paths.append(p)
+    return paths
 
 
 def preview_html(gifs, names, out: Path, size=160):
@@ -118,43 +120,43 @@ def main():
     ap.add_argument('--only', nargs='*', default=[])
     args = ap.parse_args()
 
+    if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
+        raise SystemExit('缺 ffmpeg / ffprobe：先装好再跑抽帧（`ffmpeg -version` 能跑即可）。')
+
     work = Path(args.workdir)
     cfg = load_config(work, args.config)
-    sheets = work / 'sheets'
+    videos = work / 'videos'
     gdir = work / 'output' / 'gifs'
     pdir = work / 'output' / 'preview'
+    fdir = work / 'frames'
     gdir.mkdir(parents=True, exist_ok=True)
     pdir.mkdir(parents=True, exist_ok=True)
 
     names = {}
-    compositions = {}
     ep = work / 'entries.json'
     if ep.exists():
         doc = json.loads(ep.read_text(encoding='utf-8'))
         for e in (doc['entries'] if isinstance(doc, dict) else doc):
-            no = int(e['no'])
-            names[no] = e.get('text', '')
-            compositions[no] = e.get('composition', 'full')
+            names[int(e['no'])] = e.get('text', '')
 
     pack_size = int(cfg['pack_size'])
     want = {int(s) for s in args.only} if args.only else set(range(1, pack_size + 1))
     overrides = {int(k): v for k, v in (cfg.get('cutout_overrides') or {}).items()}
-    overlays = cfg.get('prop_text_overlay') or {}
 
     reports, gifs, missing = {}, {}, []
     for no in sorted(want):
-        sheet = find_sheet(sheets, no)
-        if not sheet:
+        video = find_video(videos, no)
+        if not video:
             missing.append(no)
-            print(f'  {no:02d} MISSING sheet，跳过')
+            print(f'  {no:02d} MISSING video，跳过')
             continue
-        tiles = lib.sheet_tiles(sheet, overrides=overrides.get(no, {}))
-        if compositions.get(no) in ('half', 'scene'):
-            tiles = [lib.soften_bottom(t) for t in tiles]
-        overlay_info = None
-        if str(no) in overlays:
-            tiles, overlay_info = overlay_text(tiles, overlays[str(no)], cfg['font_path'])
-
+        frame_paths = extract_frames(video, fdir / f'{no:02d}')
+        kw = dict(overrides.get(no, {}))
+        kw.setdefault('erode_px', int(cfg.get('erode_px', 1)))
+        tiles = []
+        for p in frame_paths:
+            cell = Image.open(p).convert('RGB')
+            tiles.append(lib.cutout(cell, **kw))
         frames = [lib.frame_240(t, size=int(cfg['size']),
                                 char_box=tuple(cfg['char_box'])) for t in tiles]
         gif = gdir / f'{no:02d}.gif'
@@ -168,12 +170,12 @@ def main():
             b = t.getchannel('A').getbbox()
             boxes.append({
                 'bbox': list(b) if b else None,
-                'margins': [b[0], b[1], lib.CELL - b[2], lib.CELL - b[3]] if b else None,
+                'margins': [b[0], b[1], t.width - b[2], t.height - b[3]] if b else None,
                 'no_edge_crop': lib.edge_crop_ok(t),
-                'tight_margin': bool(b and min(b[0], b[1], lib.CELL - b[2], lib.CELL - b[3]) < 24),
+                'tight_margin': bool(b and min(b[0], b[1], t.width - b[2], t.height - b[3]) < 24),
             })
         reports[no] = {
-            'no': no, 'text': names.get(no, ''), 'sheet': sheet.name,
+            'no': no, 'text': names.get(no, ''), 'video': video.name,
             'bytes': nbytes, 'colors': colors,
             'size': qa['size'], 'frames': qa['frames'],
             'unique_frames': qa['unique_frames'], 'loop': qa['loop'],
@@ -181,11 +183,10 @@ def main():
             'boxes': boxes,
             'all_no_edge_crop': all(x['no_edge_crop'] for x in boxes),
             'pose': lib.pose_metrics(frames),
-            'prop_text_overlay': overlay_info,
         }
         gifs[no] = gif
         print(f'  {no:02d} {names.get(no, ""):<6s} {nbytes/1024:5.1f}KB /{colors:3d}色 '
-              f'帧{qa["unique_frames"]}/6 质心{reports[no]["pose"]["avg_centroid_shift_px"]}px')
+              f'帧{qa["unique_frames"]}/12 质心{reports[no]["pose"]["avg_centroid_shift_px"]}px')
 
     preview_html(gifs, names, pdir)
 
@@ -194,9 +195,9 @@ def main():
         'pack_size': pack_size, 'count': len(reports), 'missing': missing,
         'complete': len(reports) == pack_size and not missing,
         'max_gif_kb': round(max((r['bytes'] for r in allr), default=0) / 1024, 1),
-        'all_le_100KB': all(r['bytes'] <= int(cfg['limit_main']) for r in allr),
+        'all_le_340KB': all(r['bytes'] <= int(cfg['limit_main']) for r in allr),
         'all_240': all(r['size'] == [int(cfg['size'])] * 2 for r in allr),
-        'all_6_unique': all(r['unique_frames'] == 6 for r in allr),
+        'all_12_unique': all(r['unique_frames'] == 12 for r in allr),
         'all_loop_0': all(r['loop'] == 0 for r in allr),
         'all_transparent': all(r['transparency'] == 255 for r in allr),
         'all_no_blank_frame': all(not r['blank_frames'] for r in allr),
